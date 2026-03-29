@@ -1,0 +1,19 @@
+# Dependencies
+node_modules/
+
+# Fixtures and test output (traces are large + contain internal data)
+fixtures
+*.zip
+*-output/
+
+# Build / OS
+.DS_Store
+*.output/
+/tmp/
+
+# Env
+.env
+.env.*
+
+# gstack
+.gstack/

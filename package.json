@@ -1,0 +1,41 @@
+{
+  "name": "pw-trace-normalizer",
+  "version": "1.0.0",
+  "description": "Transform Playwright trace ZIPs into AI-friendly normalized output for fast failure diagnosis",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "prepublishOnly": "npm test"
+  },
+  "bin": {
+    "pw-trace-normalizer": "./cli.js"
+  },
+  "files": [
+    "index.js",
+    "cli.js",
+    "lib/"
+  ],
+  "keywords": [
+    "playwright",
+    "trace",
+    "ai",
+    "debug",
+    "testing",
+    "e2e",
+    "normalize"
+  ],
+  "author": "harryi3t",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/harryi3t/pw-trace-normalizer.git"
+  },
+  "homepage": "https://github.com/harryi3t/pw-trace-normalizer#readme",
+  "bugs": {
+    "url": "https://github.com/harryi3t/pw-trace-normalizer/issues"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
