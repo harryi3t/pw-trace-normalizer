@@ -1,6 +1,6 @@
 {
   "name": "pw-trace-normalizer",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "description": "Transform Playwright trace ZIPs into AI-friendly normalized output for fast failure diagnosis",
   "main": "index.js",
   "type": "module",
