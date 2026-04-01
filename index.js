@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, writeFile, copyFile, access, rm, readdir } from 'node:fs/promises';
+import { mkdir, mkdtemp, writeFile, readFile, copyFile, access, rm, readdir } from 'node:fs/promises';
 import { join, extname } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -24,6 +24,11 @@ export { serializeDom } from './lib/serializeDom.js';
  * @param {object} [options]
  * @param {boolean} [options.noOverwrite=false] - error if outputDir exists
  * @param {boolean} [options.includeSecrets=false] - if true, skip header redaction
+ * @param {string} [options.errorContextPath] - path to error-context.md to include in summary
+ * @param {object} [options.signals] - signal extraction config for network analysis
+ * @param {string[]} [options.signals.apiDomains] - URL substrings identifying app API calls
+ * @param {string[]} [options.signals.flagUrlPatterns] - URL substrings that must ALL match for flag eval detection
+ * @param {string} [options.signals.requestIdHeader] - response header name to extract request IDs from on 4xx/5xx
  * @returns {Promise<{outputDir: string, warnings: string[]}>}
  */
 export async function transformTrace(inputPath, outputDir, options = {}) {
@@ -86,7 +91,7 @@ export async function transformTrace(inputPath, outputDir, options = {}) {
   warnings.push(...trace.warnings);
 
   // --- Parse network ---
-  const network = await parseNetwork(traceDir);
+  const network = await parseNetwork(traceDir, options.signals);
   warnings.push(...network.warnings);
 
   // --- Parse stacks ---
@@ -216,6 +221,21 @@ export async function transformTrace(inputPath, outputDir, options = {}) {
     );
   }
 
+  // --- Write network/signals.json (only when signal extraction is configured) ---
+  const hasSignals = network.failuresWithRequestIds.length > 0
+    || network.flagEvals.length > 0
+    || network.apiBodyRefs.length > 0;
+  if (hasSignals) {
+    await writeFile(
+      join(outputDir, 'network', 'signals.json'),
+      JSON.stringify({
+        failuresWithRequestIds: network.failuresWithRequestIds,
+        flagEvals: network.flagEvals,
+        apiBodyRefs: network.apiBodyRefs,
+      }, null, 2)
+    );
+  }
+
   // --- Correlate network calls to steps by timestamp ---
   // Parse startedAt as Date for each call
   const networkCallsByTime = network.calls
@@ -292,9 +312,20 @@ export async function transformTrace(inputPath, outputDir, options = {}) {
     JSON.stringify(indexJson, null, 2)
   );
 
+  // --- Read error-context.md if provided ---
+  let errorContext = null;
+  if (options.errorContextPath) {
+    try {
+      const content = await readFile(options.errorContextPath, 'utf-8');
+      errorContext = content.length > 4096
+        ? content.slice(0, 4096) + '\n... (truncated, read full file at: ' + options.errorContextPath + ')'
+        : content;
+    } catch { /* file not found or unreadable — skip */ }
+  }
+
   // --- Write AI-optimized summary files ---
   const [summary, timeline, outline] = await Promise.all([
-    Promise.resolve(buildSummary(trace, network, stacks, cleanSteps)),
+    Promise.resolve(buildSummary(trace, network, stacks, cleanSteps, { errorContext })),
     Promise.resolve(buildFailureTimeline(cleanSteps, network.calls, trace.console)),
     Promise.resolve(buildStepsOutline(cleanSteps)),
   ]);
