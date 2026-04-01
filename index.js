@@ -316,10 +316,7 @@ export async function transformTrace(inputPath, outputDir, options = {}) {
   let errorContext = null;
   if (options.errorContextPath) {
     try {
-      const content = await readFile(options.errorContextPath, 'utf-8');
-      errorContext = content.length > 4096
-        ? content.slice(0, 4096) + '\n... (truncated, read full file at: ' + options.errorContextPath + ')'
-        : content;
+      errorContext = await readFile(options.errorContextPath, 'utf-8');
     } catch { /* file not found or unreadable — skip */ }
   }
 
