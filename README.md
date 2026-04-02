@@ -36,7 +36,7 @@ pw-trace-normalizer trace.zip --no-overwrite
 ├── failure-timeline.json # ±30s of events around each error, correlated network calls
 ├── steps-outline.json    # All test steps condensed by phase (hooks / test-body)
 ├── index.json            # Full step tree with all metadata
-├── console.jsonl         # All console messages (log / warn / error)
+├── console.json          # All console messages (log / warn / error)
 ├── dom/                  # HTML snapshots per step (pw_api_42.html, ...)
 ├── network/
 │   ├── index.json        # All network calls with sequential IDs (req-0001, ...)
