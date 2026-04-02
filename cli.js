@@ -21,7 +21,7 @@ const { values, positionals } = parseArgs({
 if (values.help || positionals.length === 0) {
   console.log(`Usage:
   pw-trace-normalizer <trace-folder-or-zip> [--output <dir>] [signal options]
-  pw-trace-normalizer --compare <passing> <failing> [--output <dir>]
+  pw-trace-normalizer --compare <passing> <failing> [--output <dir>] [signal options]
 
 Options:
   --output, -o            Output directory (default: <input>-output)
@@ -44,32 +44,40 @@ Signal extraction (enables network/signals.json + summary.signals):
 
 async function main() {
   try {
+    // Build signals config from CLI flags (used in both modes)
+    const signals = {};
+    if (values['api-domains']) {
+      signals.apiDomains = values['api-domains'].split(',').map(s => s.trim()).filter(Boolean);
+    }
+    if (values['flag-url-pattern']) {
+      signals.flagUrlPatterns = values['flag-url-pattern'].split(',').map(s => s.trim()).filter(Boolean);
+    }
+    if (values['request-id-header']) {
+      signals.requestIdHeader = values['request-id-header'];
+    }
+    const signalsOption = Object.keys(signals).length > 0 ? signals : undefined;
+
     if (values.compare) {
       if (positionals.length < 2) {
         console.error('Error: --compare requires two trace folders (passing and failing)');
         process.exit(1);
       }
-      await compareTraces(positionals[0], positionals[1], values.output, {
+      const { outputDir, warnings } = await compareTraces(positionals[0], positionals[1], values.output, {
         noOverwrite: values['no-overwrite'],
+        signals: signalsOption,
       });
+      if (warnings.length > 0) {
+        for (const w of warnings) {
+          console.error(`[warn] ${w}`);
+        }
+      }
+      console.log(`Output written to: ${outputDir}`);
     } else {
-      // Build signals config from CLI flags
-      const signals = {};
-      if (values['api-domains']) {
-        signals.apiDomains = values['api-domains'].split(',').map(s => s.trim()).filter(Boolean);
-      }
-      if (values['flag-url-pattern']) {
-        signals.flagUrlPatterns = values['flag-url-pattern'].split(',').map(s => s.trim()).filter(Boolean);
-      }
-      if (values['request-id-header']) {
-        signals.requestIdHeader = values['request-id-header'];
-      }
-
       const { outputDir, warnings } = await transformTrace(positionals[0], values.output, {
         noOverwrite: values['no-overwrite'],
         includeSecrets: values['include-secrets'],
         errorContextPath: values['error-context'],
-        signals: Object.keys(signals).length > 0 ? signals : undefined,
+        signals: signalsOption,
       });
       if (warnings.length > 0) {
         for (const w of warnings) {

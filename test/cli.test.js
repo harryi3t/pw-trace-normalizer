@@ -88,12 +88,12 @@ describe('CLI integration', () => {
   });
 });
 
-describe('compareTraces stub', () => {
-  it('compareTraces() throws "not yet implemented"', async () => {
+describe('compareTraces', () => {
+  it('compareTraces() with non-existent dirs throws (failing trace must exist)', async () => {
     const { compareTraces } = await import('../index.js');
     await assert.rejects(
-      () => compareTraces('./a', './b'),
-      { message: /not yet implemented/i }
+      () => compareTraces('/tmp/no-such-dir-pass', '/tmp/no-such-dir-fail'),
+      (err) => err instanceof Error
     );
   });
 });

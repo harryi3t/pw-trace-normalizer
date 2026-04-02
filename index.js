@@ -10,6 +10,7 @@ import { sanitizeStepId, assignScreenshots, copyScreenshots, assignDomSnapshots 
 import { buildSummary } from './lib/buildSummary.js';
 import { buildFailureTimeline } from './lib/buildTimeline.js';
 import { buildStepsOutline } from './lib/buildOutline.js';
+import { diffNetwork, diffFlags, diffSteps, diffConsole, buildComparisonJson, buildComparisonMarkdown } from './lib/buildComparison.js';
 
 export { parseTrace } from './lib/parseTrace.js';
 export { parseNetwork } from './lib/parseNetwork.js';
@@ -31,29 +32,35 @@ export { serializeDom } from './lib/serializeDom.js';
  * @param {string} [options.signals.requestIdHeader] - response header name to extract request IDs from on 4xx/5xx
  * @returns {Promise<{outputDir: string, warnings: string[]}>}
  */
+/**
+ * Extract a ZIP to a temp dir and return the trace directory path.
+ * Returns { traceDir, tempDir } where tempDir should be cleaned up by the caller.
+ * If inputPath is not a ZIP, returns { traceDir: inputPath, tempDir: null }.
+ */
+async function resolveTraceInput(inputPath) {
+  if (!inputPath.endsWith('.zip')) return { traceDir: inputPath, tempDir: null };
+  const tempDir = await mkdtemp(join(tmpdir(), 'pw-trace-'));
+  const { execFileSync } = await import('node:child_process');
+  execFileSync('unzip', ['-o', '-q', inputPath, '-d', tempDir]);
+  let traceDir = tempDir;
+  const entries = await readdir(tempDir);
+  if (entries.length === 1) {
+    try {
+      const sub = join(tempDir, entries[0]);
+      const subEntries = await readdir(sub);
+      if (subEntries.some(f => f.endsWith('.trace'))) {
+        traceDir = sub;
+      }
+    } catch { /* not a directory */ }
+  }
+  return { traceDir, tempDir };
+}
+
 export async function transformTrace(inputPath, outputDir, options = {}) {
   const warnings = [];
 
   // Handle ZIP input
-  let traceDir = inputPath;
-  let tempDir = null;
-  if (inputPath.endsWith('.zip')) {
-    tempDir = await mkdtemp(join(tmpdir(), 'pw-trace-'));
-    const { execFileSync } = await import('node:child_process');
-    execFileSync('unzip', ['-o', '-q', inputPath, '-d', tempDir]);
-    traceDir = tempDir;
-    // Check if zip extracted into a subdirectory
-    const entries = await readdir(tempDir);
-    if (entries.length === 1) {
-      const sub = join(tempDir, entries[0]);
-      try {
-        const subEntries = await readdir(sub);
-        if (subEntries.some(f => f.endsWith('.trace'))) {
-          traceDir = sub;
-        }
-      } catch { /* not a directory */ }
-    }
-  }
+  const { traceDir, tempDir } = await resolveTraceInput(inputPath);
 
   // Determine output directory (derive from inputPath, not tempDir, for ZIP inputs)
   if (!outputDir) {
@@ -265,15 +272,15 @@ export async function transformTrace(inputPath, outputDir, options = {}) {
     }
   }
 
-  // --- Write console.jsonl ---
+  // --- Write console.json ---
   const consoleLines = trace.console.map(e => JSON.stringify(e)).join('\n');
-  await writeFile(join(outputDir, 'console.jsonl'), consoleLines);
+  await writeFile(join(outputDir, 'console.json'), consoleLines);
 
   // --- Write log files per callId ---
   for (const [callId, messages] of trace.logs) {
     const safeId = callId.replace(/@/g, '_');
     const logLines = messages.map(m => JSON.stringify(m)).join('\n');
-    await writeFile(join(outputDir, 'logs', `${safeId}.jsonl`), logLines);
+    await writeFile(join(outputDir, 'logs', `${safeId}.json`), logLines);
   }
 
   // --- Write index.json ---
@@ -322,7 +329,10 @@ export async function transformTrace(inputPath, outputDir, options = {}) {
 
   // --- Write AI-optimized summary files ---
   const [summary, timeline, outline] = await Promise.all([
-    Promise.resolve(buildSummary(trace, network, stacks, cleanSteps, { errorContext })),
+    Promise.resolve(buildSummary(trace, network, stacks, cleanSteps, {
+      errorContext,
+      resourcesDir: join(traceDir, 'resources'),
+    })),
     Promise.resolve(buildFailureTimeline(cleanSteps, network.calls, trace.console)),
     Promise.resolve(buildStepsOutline(cleanSteps)),
   ]);
@@ -344,9 +354,123 @@ export async function transformTrace(inputPath, outputDir, options = {}) {
 }
 
 /**
- * Compare two traces (passing vs failing).
- * Phase 2 — stub for now.
+ * Compare a passing trace against a failing trace.
+ * Normalizes both, then produces comparison.json and comparison.md with structured diffs.
+ *
+ * @param {string} passingDir - path to passing trace folder (or .zip)
+ * @param {string} failingDir - path to failing trace folder (or .zip)
+ * @param {string} [outputDir] - output directory
+ * @param {object} [options] - same options as transformTrace (signals, includeSecrets, etc.)
+ * @returns {Promise<{outputDir: string, warnings: string[]}>}
  */
 export async function compareTraces(passingDir, failingDir, outputDir, options = {}) {
-  throw new Error('compareTraces() is not yet implemented. Phase 2.');
+  if (!outputDir) {
+    outputDir = failingDir.replace(/\.zip$/i, '') + '-compare';
+  }
+  await mkdir(outputDir, { recursive: true });
+
+  const warnings = [];
+  const failingOut = join(outputDir, 'failing');
+  const passingOut = join(outputDir, 'passing');
+
+  // Resolve ZIP inputs once. We pass the extracted dirs to transformTrace
+  // (which won't re-extract since they're not .zip) and keep them alive
+  // for diffFlags to read resources/ after normalization.
+  const resolved = { passing: null, failing: null };
+  try {
+    resolved.failing = await resolveTraceInput(failingDir);
+    resolved.passing = await resolveTraceInput(passingDir);
+  } catch (err) {
+    if (resolved.failing?.tempDir) { try { await rm(resolved.failing.tempDir, { recursive: true }); } catch { /* best effort */ } }
+    if (resolved.passing?.tempDir) { try { await rm(resolved.passing.tempDir, { recursive: true }); } catch { /* best effort */ } }
+    throw err;
+  }
+  const resolvedFailingDir = resolved.failing.traceDir;
+  const resolvedPassingDir = resolved.passing.traceDir;
+
+  try {
+    // 1. Always normalize the failing trace first
+    const failingResult = await transformTrace(resolvedFailingDir, failingOut, options);
+    warnings.push(...failingResult.warnings.map(w => `[failing] ${w}`));
+
+    // 2. Try to normalize the passing trace (may fail if corrupted/incomplete)
+    try {
+      const passingResult = await transformTrace(resolvedPassingDir, passingOut, options);
+      warnings.push(...passingResult.warnings.map(w => `[passing] ${w}`));
+    } catch (err) {
+      warnings.push(`Passing trace normalization failed: ${err.message}`);
+      await writeFile(join(outputDir, 'comparison.json'), JSON.stringify({
+        schemaVersion: 1,
+        error: `Passing trace could not be normalized: ${err.message}`,
+        summary: 'Compare mode failed -- use failing/summary.json for single-trace analysis.',
+        drillDown: { failingSummary: 'failing/summary.json' },
+      }, null, 2));
+      await writeFile(join(outputDir, 'comparison.md'),
+        '# Trace Comparison: failed\n\nPassing trace could not be normalized. Use `failing/summary.json` for single-trace analysis.\n');
+      return { outputDir, warnings };
+    }
+
+    // 3. Read normalized outputs
+    const readJson = async (p) => JSON.parse(await readFile(p, 'utf-8'));
+    const readJsonSafe = async (p) => { try { return await readJson(p); } catch { return null; } };
+    const readNdjson = async (p) => {
+      try {
+        const text = await readFile(p, 'utf-8');
+        return text.split('\n').filter(Boolean).map(line => JSON.parse(line));
+      } catch { return []; }
+    };
+
+    const passingNetworkIndex = await readJson(join(passingOut, 'network', 'index.json'));
+    const failingNetworkIndex = await readJson(join(failingOut, 'network', 'index.json'));
+    const passingSignals = await readJsonSafe(join(passingOut, 'network', 'signals.json'));
+    const failingSignals = await readJsonSafe(join(failingOut, 'network', 'signals.json'));
+    const passingOutline = await readJson(join(passingOut, 'steps-outline.json'));
+    const failingOutline = await readJson(join(failingOut, 'steps-outline.json'));
+    const passingConsole = await readNdjson(join(passingOut, 'console.json'));
+    const failingConsole = await readNdjson(join(failingOut, 'console.json'));
+
+    // 4. Diff (use resolved dirs for resources/ access)
+    const networkDiff = diffNetwork(passingNetworkIndex, failingNetworkIndex);
+    const flagsDiff = await diffFlags(
+      passingSignals, failingSignals,
+      join(resolvedPassingDir, 'resources'), join(resolvedFailingDir, 'resources')
+    );
+    const stepsDiff = diffSteps(passingOutline, failingOutline);
+    const consoleDiff = diffConsole(passingConsole, failingConsole);
+
+    // 5. Copy referenced resource files into the output so paths survive temp dir cleanup.
+    // Only copy files actually referenced by changedResponses (not the entire resources/ dir).
+    const outPassingRes = join(outputDir, 'passing', 'resources');
+    const outFailingRes = join(outputDir, 'failing', 'resources');
+    const refsToCollect = new Set();
+    for (const cr of networkDiff.changedResponses) {
+      if (cr.passingSha1) refsToCollect.add({ src: join(resolvedPassingDir, 'resources', cr.passingSha1), dest: join(outPassingRes, cr.passingSha1) });
+      if (cr.failingSha1) refsToCollect.add({ src: join(resolvedFailingDir, 'resources', cr.failingSha1), dest: join(outFailingRes, cr.failingSha1) });
+    }
+    if (refsToCollect.size > 0) {
+      await mkdir(outPassingRes, { recursive: true });
+      await mkdir(outFailingRes, { recursive: true });
+      for (const { src, dest } of refsToCollect) {
+        try { await copyFile(src, dest); } catch { /* file may not exist */ }
+      }
+    }
+
+    // 6. Build and write comparison output
+    // Resources are now at <outputDir>/passing/resources/ and <outputDir>/failing/resources/
+    const comparison = buildComparisonJson(networkDiff, flagsDiff, stepsDiff, consoleDiff, {
+      outputDir,
+      passingResourcesDir: join(outputDir, 'passing', 'resources'),
+      failingResourcesDir: join(outputDir, 'failing', 'resources'),
+    });
+    const markdown = buildComparisonMarkdown(comparison);
+
+    await writeFile(join(outputDir, 'comparison.json'), JSON.stringify(comparison, null, 2));
+    await writeFile(join(outputDir, 'comparison.md'), markdown);
+
+    return { outputDir, warnings };
+  } finally {
+    // Clean up temp dirs from ZIP extraction
+    if (resolved.failing?.tempDir) { try { await rm(resolved.failing.tempDir, { recursive: true }); } catch { /* best effort */ } }
+    if (resolved.passing?.tempDir) { try { await rm(resolved.passing.tempDir, { recursive: true }); } catch { /* best effort */ } }
+  }
 }
